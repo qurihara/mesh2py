@@ -107,12 +107,59 @@ surface-to-surface distance (|d|) over 8000 samples per side:
 - **テキストヒストグラム** — 符号付き / 絶対距離の分布
 - **偏差マップPLY**（オプション） — MeshLab/Blender で開いて誤差の集中箇所を視覚的に確認
 
-## 既知の制限
+## 適用範囲（実測）
 
-- 傾斜・曲面は階段近似になる（生成コード上で `loft` や `revolve` に手動置換可）
-- スプライン外形は近似多角形（点列で表現される）
+Tinkercad から取得した 14 個の実モデルを `scripts/batch_check.py` で回帰検証した結果:
+
+| カテゴリ | 件数 | 該当形状 |
+|---|---:|---|
+| **PASS** | 3 | 単一連結 or 少数連結 ＋ ~100 セグメント以下の単純押し出し形状（板＋穴、ボタンバーなど）|
+| **WARN** | 2 | 完走するが Hausdorff > 1mm（誤差過大、要手直し）|
+| **CRASH** | 2 | build123d 内部処理が 300 秒タイムアウト |
+| **TOO_COMPLEX** | 7 | 1 デザインあたり 800〜1200 ops、生成スクリプトが現実的時間で完了しない |
+
+詳しい数値は `scripts/batch_check.py` の出力を参照。
+
+### よく動くケース
+- 単一の連結パーツ
+- 押し出しベース＋少数の穴
+- 1〜2 のテーパー段（高さ方向で形状が緩やかに変わる）
+- セグメント数が 100 以下
+
+### 苦手なケース
+- Tinkercad アセンブリ（複数パーツが同一ワークプレーンに並ぶ） → 各パーツが多セグメントで合計 1000+ ops に
+- 急なテーパー / なめらかな曲面（階段近似で誤差が出やすい）
+- 高さ方向 30mm 超 ＋ 全層で形状が変化するモデル
+
+### CLI フラグで効くチューニング
+
+| フラグ | 効果 |
+|---|---|
+| `--no-split` | 連結成分分解を無効化（単純なメッシュなら速くなることも）|
+| `--drop-hole-area N` | N mm² 未満の内側穴（エングレーブ文字など）を無視。既定 5.0 |
+| `--drop-outer-area N` | N mm² 未満の外側ポリゴンを破棄。既定 2.0 |
+| `--min-component-volume N` | 連結成分の最小体積（mm³）。既定 50.0 |
+| `--min-component-faces N` | 連結成分の最小三角形数。既定 50 |
+| `--slice-step N` | Z スライス間隔（mm）。粗くするとセグメント数が減るが誤差大 |
+| `--no-loft` | loft 圧縮無効（OCCT loft が不安定な場合の保険）|
+| `--resample N` | 各輪郭リングを弧長等分で N 点にリサンプル（loft 安定化）。0 で無効 |
+
+### バッチ検証
+
+```bash
+.venv/bin/python scripts/batch_check.py models/your_designs/ \
+    --hausdorff-max 1.0 --mean-max 0.1 --volume-delta-max 5.0 --p99-max 0.5 \
+    --max-segments 500 --build-timeout 300
+```
+
+各モデルを PASS / WARN / FAIL / CRASH / TOO_COMPLEX に分類した Markdown 表を stdout に出力。
+
+## 既知の制限 / 今後の課題
+
+- 傾斜・曲面は階段近似（生成コード上で `loft` や `revolve` に手動置換可）
 - 連結成分が複数あれば、それぞれ別ポリゴンとして並列に積み上げる
-- 回転対称・ミラー対称の自動検出は未実装（今後の課題）
+- **OCCT `loft` の信頼性**: 多feature sketch や長い直線エッジで `BRep_API: command not done` が出やすい。要：頂点対応の改善、曲率ベース resample
+- **回転対称検出と `Cylinder`/`revolve` 直接生成**: テーパー軸対称部品を 1 行に圧縮できれば TOO_COMPLEX が大幅減
 
 ## ライセンス
 
