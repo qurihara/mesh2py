@@ -21,8 +21,11 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="shapely")
 # allow `python scripts/mesh2py.py ...` without setting PYTHONPATH
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _mesh_utils import load_mesh, align_to_z, slice_z, simplify_polys, mesh_summary
-from _feature_detect import segment_slices
+from _mesh_utils import (
+    load_mesh, align_to_z, slice_z, simplify_polys, strip_small_holes,
+    resample_polys, mesh_summary, split_components,
+)
+from _feature_detect import segment_slices, group_lofts
 from _codegen import render_script
 from _error_analysis import analyze, format_report, write_deviation_ply
 
@@ -55,6 +58,28 @@ def main() -> int:
                     help="color-ramp upper bound (mm) for --deviation-ply")
     ap.add_argument("--samples", type=int, default=8000,
                     help="surface samples per side for deviation analysis")
+    ap.add_argument("--no-split", action="store_true",
+                    help="skip connected-component decomposition; treat the "
+                         "whole mesh as one part (legacy behavior)")
+    ap.add_argument("--min-component-volume", type=float, default=50.0,
+                    help="discard connected components smaller than this volume "
+                         "(mm^3) — filters out floating triangles / engraved noise")
+    ap.add_argument("--min-component-faces", type=int, default=50,
+                    help="discard components with fewer than this many triangles")
+    ap.add_argument("--no-loft", action="store_true",
+                    help="disable loft compression of similar-topology consecutive segments")
+    ap.add_argument("--drop-hole-area", type=float, default=5.0,
+                    help="ignore interior holes whose area is below this "
+                         "(mm^2). Default 5.0 mm^2 (drops engraved letter text).")
+    ap.add_argument("--drop-outer-area", type=float, default=2.0,
+                    help="drop standalone outer polygons below this area "
+                         "(mm^2). Default 2.0 mm^2 (drops floating speckles).")
+    ap.add_argument("--resample", type=int, default=0,
+                    help="resample each contour ring to N points evenly spaced "
+                         "along arc length so adjacent slices share vertex count "
+                         "and topology (enables loft compression). 0 disables. "
+                         "WARNING: resampling can break OCCT loft on shapes with "
+                         "long straight edges; recommended only for curved meshes.")
     args = ap.parse_args()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -69,27 +94,49 @@ def main() -> int:
     summary = mesh_summary(aligned)
     print(f"[align]  extents={aligned.extents}")
 
-    print(f"[slice]  step={args.slice_step}")
-    slices = slice_z(aligned, args.slice_step)
-    print(f"[slice]  {len(slices)} non-empty layers")
+    if args.no_split:
+        components = [aligned]
+    else:
+        components = split_components(
+            aligned,
+            min_volume=args.min_component_volume,
+            min_faces=args.min_component_faces,
+        )
+    print(f"[split]  {len(components)} component(s) "
+          f"(volumes: {[round(c.volume, 1) if c.is_volume else None for c in components]})")
 
-    print(f"[simp]   tol={args.simplify}")
-    for s in slices:
-        s.polygons = simplify_polys(s.polygons, args.simplify)
+    per_comp_groups: list = []
+    for ci, comp in enumerate(components):
+        print(f"[comp {ci}] tris={len(comp.faces)} extents={comp.extents}")
+        slices = slice_z(comp, args.slice_step)
+        for s in slices:
+            s.polygons = simplify_polys(s.polygons, args.simplify)
+            if args.drop_hole_area > 0:
+                s.polygons = strip_small_holes(s.polygons, args.drop_hole_area)
+            if args.resample > 0:
+                s.polygons = resample_polys(s.polygons, args.resample)
+        segments = segment_slices(
+            slices, args.slice_step, merge_tol=args.merge_tol,
+            drop_hole_area=args.drop_hole_area,
+            drop_outer_area=args.drop_outer_area,
+        )
+        if args.no_loft:
+            groups = segments
+        else:
+            groups = group_lofts(segments)
+        n_loft = sum(1 for g in groups if hasattr(g, "features_lo"))
+        print(f"[comp {ci}] {len(slices)} layers -> {len(segments)} segs "
+              f"-> {len(groups)} ops ({n_loft} loft)")
+        per_comp_groups.append(groups)
 
-    print(f"[seg]    segmenting (merge_tol={args.merge_tol or 'auto'})...")
-    segments = segment_slices(slices, args.slice_step, merge_tol=args.merge_tol)
-    print(f"[seg]    {len(segments)} segments:")
-    for i, s in enumerate(segments):
-        kinds = [f.kind for f in s.rep_features]
-        print(f"           seg{i:>2}: z={s.z_lo:6.3f}..{s.z_hi:6.3f} "
-              f"h={s.z_hi - s.z_lo:6.3f}  features={kinds}")
+    total_ops = sum(len(g) for g in per_comp_groups)
+    print(f"[seg]    {total_ops} ops total across {len(components)} component(s)")
 
     print(f"[gen]    -> {args.output}")
     code = render_script(
         source_path=str(args.input),
         summary=summary,
-        segments=segments,
+        components=per_comp_groups,
         slice_step=args.slice_step,
         out_stl_path=str(args.reconstructed_stl),
     )

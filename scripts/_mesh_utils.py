@@ -110,6 +110,74 @@ def slice_z(mesh: trimesh.Trimesh, step: float) -> list[Slice2D]:
     return out
 
 
+def _resample_ring(coords: list[tuple[float, float]], n: int) -> list[tuple[float, float]]:
+    """Resample a closed ring to exactly n points evenly spaced along arc length.
+    This is critical for the loft compressor: adjacent slices must have
+    matching vertex counts AND corresponding points for OCCT to build
+    a clean ruled surface between them."""
+    pts = np.array(coords, dtype=float)
+    if np.allclose(pts[0], pts[-1]):
+        pts = pts[:-1]
+    if len(pts) < 3 or n < 3:
+        return [(float(x), float(y)) for x, y in pts.tolist()]
+    # cumulative arc lengths around the closed loop
+    closed = np.vstack([pts, pts[0]])
+    seg = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    total = float(cum[-1])
+    if total <= 0:
+        return [(float(x), float(y)) for x, y in pts.tolist()]
+    # find an anchor: rightmost point (max-x then max-y), so phase is stable
+    anchor = int(np.lexsort((pts[:, 1], pts[:, 0]))[-1])
+    anchor_s = float(cum[anchor])
+    targets = (anchor_s + np.linspace(0.0, total, n, endpoint=False)) % total
+    # interpolate
+    xs = np.interp(targets, cum, closed[:, 0])
+    ys = np.interp(targets, cum, closed[:, 1])
+    return [(float(x), float(y)) for x, y in zip(xs, ys)]
+
+
+def resample_polys(polys: list[Polygon], n: int) -> list[Polygon]:
+    """Resample exterior and interior rings of each polygon to n points
+    by arc length. Holes are also resampled to keep their topology stable."""
+    if n < 3:
+        return polys
+    out: list[Polygon] = []
+    for p in polys:
+        if isinstance(p, MultiPolygon):
+            geoms = list(p.geoms)
+        else:
+            geoms = [p]
+        for g in geoms:
+            ext = _resample_ring(list(g.exterior.coords), n)
+            ints = [_resample_ring(list(r.coords), n) for r in g.interiors]
+            out.append(Polygon(ext, holes=ints))
+    return out
+
+
+def strip_small_holes(polys: list[Polygon], min_hole_area: float) -> list[Polygon]:
+    """Return polygons with all interior rings (holes) whose area is below
+    `min_hole_area` filled in. Useful to ignore engraved label text and
+    other fine details that hurt segmentation/loft compression without
+    meaningfully affecting the reconstructed silhouette."""
+    if min_hole_area <= 0:
+        return polys
+    out: list[Polygon] = []
+    for p in polys:
+        if isinstance(p, MultiPolygon):
+            geoms = list(p.geoms)
+        else:
+            geoms = [p]
+        for g in geoms:
+            kept_interiors = []
+            for ring in g.interiors:
+                ring_poly = Polygon(list(ring.coords))
+                if ring_poly.area >= min_hole_area:
+                    kept_interiors.append(list(ring.coords))
+            out.append(Polygon(list(g.exterior.coords), holes=kept_interiors))
+    return out
+
+
 def simplify_polys(polys: list[Polygon], tol: float) -> list[Polygon]:
     out: list[Polygon] = []
     for p in polys:
@@ -120,6 +188,46 @@ def simplify_polys(polys: list[Polygon], tol: float) -> list[Polygon]:
             else:
                 out.append(sp)
     return out
+
+
+def split_components(mesh: trimesh.Trimesh, *, min_volume: float = 50.0,
+                     min_faces: int = 50,
+                     only_watertight: bool = False) -> list[trimesh.Trimesh]:
+    """Split a mesh into connected-component sub-meshes.
+
+    Tinkercad designs typically place several discrete parts on the same
+    workplane. Reconstructing each component independently keeps per-part
+    segment counts manageable and lets build123d emit one BuildPart per
+    component, which is dramatically faster than one BuildPart with
+    hundreds of stacked sketches.
+
+    Components below `min_volume` mm^3 OR with fewer than `min_faces`
+    triangles are discarded as noise. Tinkercad meshes often contain
+    1-2 triangle "ghost" shells from the export process and small flat
+    engraving plates that aren't useful to reconstruct.
+    """
+    try:
+        parts = mesh.split(only_watertight=only_watertight)
+    except Exception:
+        return [mesh]
+    if not parts:
+        return [mesh]
+    kept: list[trimesh.Trimesh] = []
+    for p in parts:
+        if len(p.faces) < min_faces:
+            continue
+        try:
+            v = float(p.volume) if p.is_volume else 0.0
+        except Exception:
+            v = 0.0
+        # bbox-volume fallback for non-watertight shells
+        e = p.extents
+        bbv = float(e[0] * e[1] * e[2])
+        score = max(v, bbv * 0.1)   # accept if either watertight volume or
+                                    # ~10% of bbox volume meets the bar
+        if score >= min_volume:
+            kept.append(p)
+    return kept or [mesh]
 
 
 def mesh_summary(mesh: trimesh.Trimesh) -> dict:

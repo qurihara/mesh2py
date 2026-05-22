@@ -12,6 +12,9 @@ env/
 # generated artifacts
 output/
 
+# downloaded test STLs from Tinkercad (large, regenerable)
+models/tinkercad_sample/
+
 # OS
 .DS_Store
 Thumbs.db
