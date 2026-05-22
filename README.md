@@ -25,7 +25,26 @@
 - 急なテーパー / なめらかな曲面（階段近似で誤差が出やすい）
 - 高さ方向 30mm 超 ＋ 全層で形状が変化するモデル
 
-実測の限界例は [models/tinkercad_assembly_sample/](models/tinkercad_assembly_sample/) に残してあります。
+実測の限界例は [models/tinkercad_assembly_sample/](models/tinkercad_assembly_sample/) に残してあります（STL本体はIPのためgitignore）。
+
+### 単体パーツ 10サンプルでの実測（参考値）
+
+Tinkercad のさまざまなデザインから「1パーツだけ選択して Export」した STL を 10件用意して `scripts/batch_check.py` を回した結果（[models/tinkercad_single/README.md](models/tinkercad_single/README.md) も参照）:
+
+| 三角形数 | セグ数 | 例 | 結果 |
+|---:|---:|---|:---|
+| 234〜384 | 1〜3 | 単純な押し出しパドル / J型アタッチメント | **PASS** (Hausdorff ≤ 0.07mm) |
+| 1474 | 14 | 城壁状の角バー | **PASS** (Hausdorff 0.28mm) |
+| 1760 | 45 | テーパーボタン + 文字engraving | WARN (Hausdorff 24mm — engraving が破綻要因) |
+| 1120 | 5 | 溝付きベースプレート | WARN (p99 0.78mm — 微小角の階段化) |
+| 3986 | 234 | DNA らせん | **PASS** (Hausdorff 0.52mm) |
+| 6030 | 97 | きのこ型ドーム | **PASS** (Hausdorff 0.91mm) |
+| 6122 | 161 | 八角形 + 円柱 | WARN (Hausdorff 1.96mm) |
+| 192 | 49 | 小さな立方体に多feature | **FAIL** (OCCT `TopoDS::Face` 例外) |
+
+**集計: PASS 5, WARN 4, FAIL 1**。300 segments を超えても PASS する例（DNA らせん）がある一方、200 三角形でも feature が密だと OCCT が破綻するケースも。
+
+偏差マップは `scripts/gen_deviation_plys.py models/tinkercad_single/` でまとめて生成可、MeshLab/Blender 等で開ける。
 
 ## Tinkercad で「単体パーツ」をエクスポートする手順
 
@@ -133,6 +152,15 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 各モデルを `PASS / WARN / FAIL / CRASH / TOO_COMPLEX` に分類した Markdown 表を stdout に出力。
+
+## 偏差マップを一括生成
+
+```bash
+.venv/bin/python scripts/gen_deviation_plys.py models/tinkercad_single/
+# -> output/single_deviation/<model>_deviation.ply
+```
+
+各モデルについて build123d で再構築 → 元STLとの距離を頂点色で塗った PLY を作る。MeshLab / Blender で開いて、誤差がどこに集中しているか（テーパー面の階段か、文字engraving か、特定 feature か）を視覚で確認できる。
 
 ## ディレクトリ構成
 
