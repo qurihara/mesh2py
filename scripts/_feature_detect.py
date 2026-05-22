@@ -59,17 +59,21 @@ class RevolvePrimitive:
 @dataclass
 class LoftGroup:
     """A run of consecutive segments with matching topology, to be emitted
-    as a single `loft(...)` instead of N stacked extrudes.
+    as separate `loft(...)` calls, one per paired feature.
+
+    Each entry in `pairs` is (feature_lo, feature_hi) — same-kind features
+    sitting at z_lo and z_hi respectively, matched by centroid distance.
+    Emitting one loft per pair (rather than one loft over multi-feature
+    sketches) avoids OCCT confusing which sub-shape pairs with which.
 
     `segments` keeps the original per-slice segments so the generated
     script can fall back to a stack of extrudes if OCCT loft fails at
     runtime."""
     z_lo: float
     z_hi: float
-    features_lo: list[Feature2D]
-    features_hi: list[Feature2D]
+    pairs: list[tuple[Feature2D, Feature2D]]
     segments: list[Segment]
-    n_merged: int = 1   # how many original segments were collapsed into this
+    n_merged: int = 1
 
 
 # ---------------------------------------------------------------- ring detect
@@ -235,14 +239,14 @@ def segment_slices(
 
 # ---------------------------------------------------------------- loft grouping
 
-def _features_match_topology(a: list[Feature2D], b: list[Feature2D]) -> bool:
-    """True iff a and b can be lofted between (same count + per-feature kind
-    + same number of vertices for polygons + same number of holes)."""
+def _pair_features(a: list[Feature2D], b: list[Feature2D]) \
+        -> list[tuple[Feature2D, Feature2D]] | None:
+    """Greedy-match features by centroid distance. Returns the list of
+    (a_i, b_j) pairs, or None if pairing impossible (different counts)."""
     if len(a) != len(b):
-        return False
-    # pair features by centroid distance
-    used = set()
-    pairs = []
+        return None
+    used: set[int] = set()
+    pairs: list[tuple[Feature2D, Feature2D]] = []
     for fa in a:
         best_j = None
         best_d = float("inf")
@@ -256,10 +260,18 @@ def _features_match_topology(a: list[Feature2D], b: list[Feature2D]) -> bool:
                 best_d = d
                 best_j = j
         if best_j is None:
-            return False
+            return None
         used.add(best_j)
         pairs.append((fa, b[best_j]))
-    # check per-feature kind + topology
+    return pairs
+
+
+def _features_match_topology(a: list[Feature2D], b: list[Feature2D]) -> bool:
+    """True iff a and b can be lofted between (same count + per-feature kind
+    + same number of vertices for polygons + same number of holes)."""
+    pairs = _pair_features(a, b)
+    if pairs is None:
+        return False
     for fa, fb in pairs:
         if fa.kind != fb.kind:
             return False
@@ -370,12 +382,17 @@ def _loft_safe(features: list[Feature2D], *, max_poly_pts: int = 80) -> bool:
     return True
 
 
-def group_lofts(segments: list[Segment]) -> list[Group]:
+def group_lofts(segments: list[Segment], *, min_run: int = 5) -> list[Group]:
     """Collapse runs of consecutive segments with matching topology into
     LoftGroups (one loft op instead of N extrudes). Useful for tapered/
     swept surfaces that the slicer breaks into many tiny segments.
 
-    Only single-feature, hole-free runs are lofted to keep OCCT happy."""
+    Only single-feature, hole-free runs of length >= `min_run` are
+    lofted. Short matching runs (2-4 segs) are usually accidental
+    topology matches on what is actually a step-changing surface, and
+    lofting them loses accuracy. Surfaces that are genuinely smooth
+    produce long runs (10-50 segments) where the loft approximation
+    pays off."""
     if not segments:
         return []
     out: list[Group] = []
@@ -390,17 +407,24 @@ def group_lofts(segments: list[Segment]) -> list[Group]:
                    segments[j - 1].rep_features, segments[j].rep_features
                )):
             j += 1
-        if j - i >= 2 and _loft_safe(segments[i].rep_features):
-            out.append(LoftGroup(
-                z_lo=segments[i].z_lo,
-                z_hi=segments[j - 1].z_hi,
-                features_lo=segments[i].rep_features,
-                features_hi=segments[j - 1].rep_features,
-                segments=list(segments[i:j]),
-                n_merged=j - i,
-            ))
+        if j - i >= min_run and _loft_safe(segments[i].rep_features):
+            pairs = _pair_features(segments[i].rep_features,
+                                   segments[j - 1].rep_features)
+            if pairs is None:
+                # Pairing failed — emit each segment individually.
+                for s in segments[i:j]:
+                    out.append(s)
+            else:
+                out.append(LoftGroup(
+                    z_lo=segments[i].z_lo,
+                    z_hi=segments[j - 1].z_hi,
+                    pairs=pairs,
+                    segments=list(segments[i:j]),
+                    n_merged=j - i,
+                ))
         else:
-            out.append(segments[i])
-            j = i + 1
+            # Too short to loft — keep as individual extrudes.
+            for s in segments[i:j]:
+                out.append(s)
         i = j
     return out

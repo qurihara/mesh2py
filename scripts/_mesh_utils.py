@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
-from shapely.geometry import LineString, Polygon, MultiPolygon
+from shapely.geometry import LinearRing, LineString, Point, Polygon, MultiPolygon
 from shapely.ops import polygonize, unary_union
 
 
@@ -121,6 +121,84 @@ def slice_z(mesh: trimesh.Trimesh, step: float) -> list[Slice2D]:
     return out
 
 
+def _resample_ring_angular(
+    coords: list[tuple[float, float]], n: int,
+    *, center: tuple[float, float] | None = None,
+) -> list[tuple[float, float]]:
+    """Resample a closed ring to N points by casting rays from the polygon
+    centroid at uniform angular intervals and taking the farthest
+    intersection with the boundary.
+
+    Why this over arc-length resampling:
+    - Long straight edges no longer absorb many sample points (which
+      OCCT `loft` chokes on as near-collinear runs).
+    - The i-th output point in slice A and slice B sit at the SAME
+      angular position relative to the slice centroid, giving loft
+      a stable vertex correspondence across Z. Tapered shapes that
+      shrink uniformly stay correctly interpolated.
+
+    Limitation: requires the polygon to be star-convex relative to the
+    centroid. For non-star-convex shapes (rare in printed parts after
+    component decomposition) we may pick a non-outermost intersection;
+    we mitigate by taking the farthest hit on the ray.
+    """
+    pts = np.array(coords, dtype=float)
+    if np.allclose(pts[0], pts[-1]):
+        pts = pts[:-1]
+    if len(pts) < 3 or n < 3:
+        return [(float(x), float(y)) for x, y in pts.tolist()]
+    if center is None:
+        cx = float(pts[:, 0].mean())
+        cy = float(pts[:, 1].mean())
+    else:
+        cx, cy = float(center[0]), float(center[1])
+    radii = np.linalg.norm(pts - np.array([cx, cy]), axis=1)
+    max_r = float(radii.max()) * 3.0 + 1.0
+    coords_closed = list(pts.tolist()) + [pts[0].tolist()]
+    ring = LinearRing(coords_closed)
+    out: list[tuple[float, float]] = []
+    for i in range(n):
+        theta = 2.0 * np.pi * i / n
+        end = (cx + np.cos(theta) * max_r, cy + np.sin(theta) * max_r)
+        ray = LineString([(cx, cy), end])
+        inter = ring.intersection(ray)
+        # Collect candidate points and pick the one farthest from centroid
+        candidates: list[tuple[float, float]] = []
+        if inter.is_empty:
+            pass
+        elif inter.geom_type == "Point":
+            candidates.append((inter.x, inter.y))
+        elif inter.geom_type == "MultiPoint":
+            for p in inter.geoms:
+                candidates.append((p.x, p.y))
+        elif inter.geom_type in ("LineString", "MultiLineString"):
+            # Tangential intersection on a flat edge — take endpoints
+            if inter.geom_type == "LineString":
+                for c in inter.coords:
+                    candidates.append((c[0], c[1]))
+            else:
+                for ls in inter.geoms:
+                    for c in ls.coords:
+                        candidates.append((c[0], c[1]))
+        elif inter.geom_type == "GeometryCollection":
+            for g in inter.geoms:
+                if g.geom_type == "Point":
+                    candidates.append((g.x, g.y))
+                elif g.geom_type in ("LineString",):
+                    for c in g.coords:
+                        candidates.append((c[0], c[1]))
+        if not candidates:
+            # Fall back to bbox direction at max_r — should never happen
+            # for a finite closed polygon, but be defensive.
+            out.append((cx + np.cos(theta) * float(radii.max()),
+                        cy + np.sin(theta) * float(radii.max())))
+            continue
+        best = max(candidates,
+                   key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
+        out.append((float(best[0]), float(best[1])))
+    return out
+
+
 def _resample_ring(coords: list[tuple[float, float]], n: int) -> list[tuple[float, float]]:
     """Resample a closed ring to exactly n points evenly spaced along arc length.
     This is critical for the loft compressor: adjacent slices must have
@@ -148,21 +226,45 @@ def _resample_ring(coords: list[tuple[float, float]], n: int) -> list[tuple[floa
     return [(float(x), float(y)) for x, y in zip(xs, ys)]
 
 
-def resample_polys(polys: list[Polygon], n: int) -> list[Polygon]:
-    """Resample exterior and interior rings of each polygon to n points
-    by arc length. Holes are also resampled to keep their topology stable."""
+def resample_polys(polys: list[Polygon], n: int,
+                    *, mode: str = "angular") -> list[Polygon]:
+    """Resample exterior and interior rings of each polygon to n points.
+
+    mode="angular" (default): rays from centroid at uniform angles. Gives
+        loft-friendly vertex correspondence and avoids dense collinear
+        runs on long straight edges. Polygon must be roughly star-convex
+        relative to its centroid.
+    mode="arclen": uniform arc-length distribution. Stable for any
+        topology but creates collinear point clusters on straight edges
+        which OCCT loft struggles with.
+    """
     if n < 3:
         return polys
     out: list[Polygon] = []
+    sampler = _resample_ring_angular if mode == "angular" else _resample_ring
     for p in polys:
         if isinstance(p, MultiPolygon):
             geoms = list(p.geoms)
         else:
             geoms = [p]
         for g in geoms:
-            ext = _resample_ring(list(g.exterior.coords), n)
-            ints = [_resample_ring(list(r.coords), n) for r in g.interiors]
-            out.append(Polygon(ext, holes=ints))
+            cx, cy = float(g.centroid.x), float(g.centroid.y)
+            ext = sampler(list(g.exterior.coords), n, center=(cx, cy)) \
+                if mode == "angular" else sampler(list(g.exterior.coords), n)
+            ints = []
+            for r in g.interiors:
+                ring = Polygon(list(r.coords))
+                ic = (float(ring.centroid.x), float(ring.centroid.y))
+                if mode == "angular":
+                    ints.append(sampler(list(r.coords), n, center=ic))
+                else:
+                    ints.append(sampler(list(r.coords), n))
+            try:
+                out.append(Polygon(ext, holes=ints))
+            except Exception:
+                # If resampling produced a degenerate polygon, fall back
+                # to the original.
+                out.append(g)
     return out
 
 

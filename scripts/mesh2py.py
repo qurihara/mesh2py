@@ -66,8 +66,20 @@ def main() -> int:
                          "(mm^3) — filters out floating triangles / engraved noise")
     ap.add_argument("--min-component-faces", type=int, default=50,
                     help="discard components with fewer than this many triangles")
+    ap.add_argument("--loft", action="store_true",
+                    help="enable loft compression of long topology-matching "
+                         "segment runs (default OFF). Trade-off: cuts op count "
+                         "for tapered surfaces (good for TOO_COMPLEX assemblies) "
+                         "but linearly interpolates between endpoint sketches, "
+                         "which loses accuracy on non-linear shapes. Use with "
+                         "--loft-min-run to tune.")
     ap.add_argument("--no-loft", action="store_true",
-                    help="disable loft compression of similar-topology consecutive segments")
+                    help="(legacy) disable loft. Loft is now off by default; "
+                         "this flag is kept for backward compatibility.")
+    ap.add_argument("--loft-min-run", type=int, default=10,
+                    help="minimum number of consecutive same-topology segments "
+                         "before they get collapsed into one loft (default 10). "
+                         "Longer runs amortize the approximation error better.")
     ap.add_argument("--no-primitive", action="store_true",
                     help="disable Cylinder/revolve primitive detection per component")
     ap.add_argument("--drop-hole-area", type=float, default=5.0,
@@ -137,11 +149,11 @@ def main() -> int:
             drop_hole_area=args.drop_hole_area,
             drop_outer_area=args.drop_outer_area,
         )
-        if args.no_loft:
-            groups = segments
+        if args.loft and not args.no_loft:
+            groups = group_lofts(segments, min_run=args.loft_min_run)
         else:
-            groups = group_lofts(segments)
-        n_loft = sum(1 for g in groups if hasattr(g, "features_lo"))
+            groups = segments
+        n_loft = sum(1 for g in groups if hasattr(g, "pairs"))
         print(f"[comp {ci}] {len(slices)} layers -> {len(segments)} segs "
               f"-> {len(groups)} ops ({n_loft} loft)")
         per_comp_groups.append(groups)

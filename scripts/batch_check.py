@@ -92,7 +92,8 @@ def run_one(stl: Path, work: Path, *, slice_step: float, timeout: int,
         "--reconstructed-stl", str(out_stl),
         "--slice-step", str(slice_step),
         "--no-validate",
-        "--no-loft",                 # loft currently unreliable on Tinkercad meshes
+        # loft stays off by default (linear interp degrades accuracy on
+        # non-linear tapered surfaces); explicit --loft to enable.
     ]
     t0 = time.perf_counter()
     try:

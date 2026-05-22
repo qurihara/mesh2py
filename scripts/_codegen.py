@@ -180,33 +180,34 @@ def render_script(
                 )
                 continue
             if isinstance(g, LoftGroup):
-                kinds = ", ".join(f.kind for f in g.features_lo) or "empty"
+                kinds = ", ".join(fa.kind for fa, _ in g.pairs) or "empty"
                 body_lines.append(
                     f"    # ---- comp {ci} loft {si}: z={g.z_lo:.3f}..{g.z_hi:.3f} "
-                    f"(h={h:.3f}, merged={g.n_merged} segs), features=[{kinds}] ----"
+                    f"(h={h:.3f}, merged={g.n_merged} segs, "
+                    f"{len(g.pairs)} pairs, features=[{kinds}]) ----"
                 )
-                if not g.features_lo:
+                if not g.pairs:
                     body_lines.append("    pass")
                     continue
-                body_lines.append(
-                    f"    with BuildSketch(Plane.XY.offset({g.z_lo:.3f})) "
-                    f"as sk_{ci}_{si}_lo:"
-                )
-                for f in g.features_lo:
-                    body_lines.extend(_feature_sketch_lines(f, indent="        "))
-                body_lines.append(
-                    f"    with BuildSketch(Plane.XY.offset({g.z_hi:.3f})) "
-                    f"as sk_{ci}_{si}_hi:"
-                )
-                for f in g.features_hi:
-                    body_lines.extend(_feature_sketch_lines(f, indent="        "))
-                # Try loft; on OCCT failure, fall back to the original stack
-                # of per-slice extrudes (preserves accuracy at the cost of
-                # more sketches).
+                # Emit one loft per feature pair (each is a single polygon
+                # at z_lo and z_hi). OCCT handles single-section lofts
+                # much more reliably than multi-section ones.
                 body_lines.append(f"    try:")
-                body_lines.append(
-                    f"        loft([sk_{ci}_{si}_lo.sketch, sk_{ci}_{si}_hi.sketch])"
-                )
+                for pi, (fa, fb) in enumerate(g.pairs):
+                    body_lines.append(
+                        f"        with BuildSketch(Plane.XY.offset({g.z_lo:.3f})) "
+                        f"as sk_{ci}_{si}_{pi}_lo:"
+                    )
+                    body_lines.extend(_feature_sketch_lines(fa, indent="            "))
+                    body_lines.append(
+                        f"        with BuildSketch(Plane.XY.offset({g.z_hi:.3f})) "
+                        f"as sk_{ci}_{si}_{pi}_hi:"
+                    )
+                    body_lines.extend(_feature_sketch_lines(fb, indent="            "))
+                    body_lines.append(
+                        f"        loft([sk_{ci}_{si}_{pi}_lo.sketch, "
+                        f"sk_{ci}_{si}_{pi}_hi.sketch])"
+                    )
                 body_lines.append(f"    except Exception as _loft_err_{ci}_{si}:")
                 body_lines.append(
                     f"        print(f'[warn] loft comp{ci} op{si} failed "
