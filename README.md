@@ -2,25 +2,40 @@
 
 3Dメッシュ（STL / OBJ / GLB）から **build123d** のPythonコードを生成する逆エンジニアリングツール。
 
-入力されたメッシュをZ軸方向にスライス・輪郭抽出・特徴分類し、`BuildSketch + extrude` のスタックとして build123d スクリプトを書き出します。生成されるスクリプトは「ゼロからこの部品を作るためのプロンプト（= 編集可能なパラメトリックCADコード）」として、人間やLLMが寸法調整・形状改変・パラメータ化を行う出発点になります。
+入力メッシュをZ軸方向にスライス→輪郭抽出→特徴分類し、`BuildSketch + extrude` のスタックとして build123d スクリプトを書き出します。生成されるコードは「ゼロから同じ部品を作るためのプロンプト（= 編集可能なパラメトリックCADコード）」として、人間や LLM が寸法調整・形状改変・パラメータ化する出発点になります。
 
-## 何のため？
+## 想定ユースケース
 
-- ダウンロードしたSTLや3Dスキャンメッシュには**履歴・パラメータがない**。少し寸法を変えたいだけでもCADソフトでゼロからやり直しになりがち。
-- メッシュ→ build123d コード化することで、「Z=0–2mmの楕円ベース」「Z=2–18mmの二翼」のような**構造を読める形**に分解し、特定の寸法だけ書き換えて再生成、といった操作が可能になる。
-- 3Dプリンタの標準層厚（0.2mm）で動作するので、出力もそのまま印刷向けに使える精度が出る。
+> **単一パーツの逆エンジニアリング** — Tinkercad で作って STL になってしまった「1個の部品」を、寸法を変えたり機能追加したりできる Python コードに起こす。
 
-## パイプライン
+- ダウンロードしたSTLや3Dスキャンには履歴・パラメータがない。少し寸法を変えたいだけでもCADソフトでやり直しになりがち
+- mesh2py で**読める構造のbuild123dコード**に起こせば、寸法を書き換えて再生成、特徴を `Cylinder()` / `revolve` / `fillet()` に書き換える、といった操作が可能
+- 0.2mm 刻みの Z スライスで動作するので、3Dプリンタの標準層厚と整合した精度が出る
 
-1. **load**  — trimesh で STL/OBJ/GLB を読込
-2. **align** — PCA で最小分散軸をZに合わせ原点へ平行移動
-3. **slice** — Z軸を `--slice-step` 刻み（既定 0.2mm）で水平カット、shapely Polygon を抽出
-4. **classify** — 各輪郭を `Circle` / `Rectangle` / `Polygon` に分類（穴・島も識別）
-5. **segment** — 隣接スライス間の Hausdorff 距離が `--merge-tol` 以下なら同セグメントに統合
-6. **codegen** — build123d の `BuildPart` ＋ 各セグメントごとの `BuildSketch + extrude` として出力
-7. **validate** — 生成コードを実行し、元STLとの偏差を解析
+### 動かしやすいケース（推奨）
 
-階段状の近似なので傾斜面はステップになりますが、`--slice-step 0.2` で印刷層厚と整合し、ほとんどのサンプル点が層厚以下に収まります。
+- **単体の連結パーツ** — 1つのワークプレーンに 1部品だけが置かれた状態の STL
+- 押し出しベース＋少数の穴
+- 1〜2 のテーパー段（高さ方向で形状が緩やかに変わる）
+- 回転対称な円筒・テーパー筒（`Cylinder` / `revolve` に自動圧縮される）
+
+### 苦手なケース
+
+- **Tinkercad アセンブリ Export**（複数パーツが同一ワークプレーンに並ぶまま `.STL` 化）→ 各成分のテーパー面が seg爆発（22成分 × 75segs/成分 など）して build123d が時間内に処理しきれない
+- 急なテーパー / なめらかな曲面（階段近似で誤差が出やすい）
+- 高さ方向 30mm 超 ＋ 全層で形状が変化するモデル
+
+実測の限界例は [models/tinkercad_assembly_sample/](models/tinkercad_assembly_sample/) に残してあります。
+
+## Tinkercad で「単体パーツ」をエクスポートする手順
+
+1. デザインを開く
+2. **エクスポートしたいパーツを1つだけ選択**（クリック、または矩形選択で複数同時可）
+3. 右上の「エクスポート」を押す
+4. ダイアログ上で **`含める: 選択したシェイプ`** にチェック（既定は「デザイン内のすべて」）
+5. **`.STL`** を押す
+
+これでそのパーツだけの STL が `~/Downloads/` に落ちます。mesh2py は `models/tinkercad_single/` 配下を想定しています。
 
 ## インストール
 
@@ -36,130 +51,101 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ## 使い方
 
 ```bash
-.venv/bin/python scripts/mesh2py.py <mesh-file> -o <output.py>
+.venv/bin/python scripts/mesh2py.py <mesh-file.stl> -o <output.py>
 ```
 
 ### サンプル
 
+リポジトリに同梱の単体ボタン部品で動作確認:
+
 ```bash
 .venv/bin/python scripts/mesh2py.py \
-    models/vertical-impact-button-f30-v6.1.stl \
+    models/tinkercad_assembly_sample/14_vertical-impact-button-f30-v61.stl \
     -o output/vertical-impact-button.py \
     --deviation-ply output/deviation.ply
 ```
 
-これで以下が生成されます:
-
+生成されるもの:
 - `output/vertical-impact-button.py` — 編集可能な build123d スクリプト
 - `output/reconstructed.stl` — 検証用に再エクスポートしたSTL
-- `output/deviation.ply` — 元STLとの偏差を頂点色（青=0 → 緑 → 赤=clip以上）で表示するPLY
+- `output/deviation.ply` — 元STLとの偏差を頂点色（青=0→緑→赤≧clip）で表示する PLY
 
-### CLIオプション
+実測値: Hausdorff 0.26mm, 体積差 +0.31%, 99%以上のサンプル点が層厚0.2mm以下に収まる。
 
-| オプション | 既定値 | 説明 |
+## パイプライン
+
+1. **load** — trimesh で STL/OBJ/GLB を読込
+2. **align** — PCA で最小分散軸を Z に合わせ原点へ平行移動（厚みが他軸より十分小さいときだけ swap）
+3. **split** — `mesh.split()` で連結成分に分解＋小さなノイズシェル除去
+4. **slice** — Z軸を `--slice-step` 刻み（既定 0.2mm）で水平カット、shapely Polygon を抽出
+5. **classify** — 各輪郭を `Circle` / `Rectangle` / `Polygon` に分類（穴・島も識別、小さな文字穴は破棄）
+6. **primitive detect** — 成分ごとに Z軸回転対称性をチェック。対称なら `Cylinder` か `revolve` に圧縮（数十 segs → 1op）
+7. **segment** — 隣接スライス間の Hausdorff 距離が閾値以下なら同セグメントに統合
+8. **codegen** — 成分ごとに `BuildPart` を作って `BuildSketch + extrude` を積む。最後に `Compound` で束ねる
+9. **validate** — 生成コードを実行し、元STLとの偏差を解析
+
+階段状の近似なので傾斜面はステップになりますが、`--slice-step 0.2` で印刷層厚と整合し、ほとんどのサンプル点が層厚以下に収まります。
+
+## CLI オプション
+
+| フラグ | 既定 | 説明 |
 |---|---|---|
-| `--slice-step` | `0.2` | Z軸スライス間隔（mm）。3Dプリンタ層厚に合わせる |
-| `--merge-tol` | `1.5 × slice-step` | 隣接スライス統合の Hausdorff しきい値（mm） |
-| `--simplify` | `0.05` | 輪郭シンプル化の許容誤差（mm） |
-| `--axis` | auto | `x`/`y`/`z` を明示指定（既定は最小分散軸） |
-| `--reconstructed-stl` | `output/reconstructed.stl` | 生成スクリプトのSTL出力先 |
-| `--deviation-ply` | (なし) | 偏差マップPLYを書き出すパス |
-| `--deviation-clip` | `1.0` | 偏差マップの赤側カラーランプ上限（mm） |
-| `--samples` | `8000` | 偏差解析でメッシュ表面から取るサンプル点数（片側） |
-| `--no-validate` | off | 生成スクリプトの実行と偏差解析をスキップ |
+| `-o, --output PATH` | (必須) | 生成する `.py` のパス |
+| `--reconstructed-stl PATH` | `output/reconstructed.stl` | 生成スクリプトのSTL出力先 |
+| `--slice-step N` | `0.2` | Zスライス間隔（mm）|
+| `--simplify N` | `0.05` | 輪郭シンプル化の許容誤差（mm）|
+| `--merge-tol N` | `1.5 × slice-step` | 隣接スライス統合の Hausdorff しきい値（mm）|
+| `--axis {x,y,z}` | auto | スライス方向を明示指定 |
+| `--no-split` | off | 連結成分分解を無効化 |
+| `--min-component-volume N` | `50.0` | 連結成分の最小体積（mm³）|
+| `--min-component-faces N` | `50` | 連結成分の最小三角形数 |
+| `--drop-hole-area N` | `5.0` | N mm² 未満の内側穴を無視（エングレーブ文字対策）|
+| `--drop-outer-area N` | `2.0` | N mm² 未満の外側ポリゴンを破棄 |
+| `--no-primitive` | off | Cylinder/revolve 検出を無効化 |
+| `--loft` | off | テーパー面を `loft` に圧縮（実験的、精度落ちる）|
+| `--loft-min-run N` | `10` | loft 化する最小連続セグメント数 |
+| `--resample N` | `0` | 各輪郭を N 点に角度等分リサンプル（loft安定化用）|
+| `--deviation-ply PATH` | (なし) | 偏差マップ PLY を書き出す |
+| `--deviation-clip N` | `1.0` | 偏差マップ赤側カラーランプ上限（mm）|
+| `--samples N` | `8000` | 偏差解析の表面サンプル点数（片側）|
+| `--no-validate` | off | 生成スクリプト実行＋偏差解析をスキップ |
 
-## 出力例
-
-サンプルモデル `vertical-impact-button-f30-v6.1` (40×65×20mm, 1544三角形) を `--slice-step 0.2` で実行した結果:
-
-```
-bbox extents (mm)
-    original     :   40.000 x   65.000 x   20.000
-    reconstructed:   40.000 x   65.001 x   20.000
-    max axis diff: 0.0010 mm
-
-volume        : orig=  7941.747  recon=  7980.829  (Δ= +0.49 %)
-surface area  : orig=  6507.550  recon=  6587.080  (Δ= +1.22 %)
-
-surface-to-surface distance (|d|) over 8000 samples per side:
-    Hausdorff (max) : 0.8020 mm
-    mean            : 0.0086 mm
-    RMS             : 0.0490 mm
-    median          : 0.0000 mm
-    p90 / p95 / p99 : 0.0000 / 0.0432 / 0.1978 mm
-    %|d|>0.2mm (orig-side): 0.91 %
-```
-
-99%以上のサンプル点が層厚 0.2mm 以下の誤差に収まっています。
-
-## 誤差解析機能
+## 誤差解析
 
 `mesh2py` は実行のたびに以下を自動表示します:
 
 - **bbox** — 各軸の絶対値・差（mm）
 - **体積 / 表面積** — 絶対値と差分（%）
 - **表面距離** — 両側 N サンプルから:
-  - Hausdorff（最大）
-  - 平均、RMS、中央値
+  - Hausdorff（最大）/ 平均 / RMS / 中央値
   - p90 / p95 / p99
   - **層厚超過率**（>0.2mm の割合）
-- **符号付き距離** — 「復元が元より内側か外側か」
+- **符号付き距離** — 復元が元より内側か外側か
 - **テキストヒストグラム** — 符号付き / 絶対距離の分布
-- **偏差マップPLY**（オプション） — MeshLab/Blender で開いて誤差の集中箇所を視覚的に確認
+- **偏差マップPLY**（`--deviation-ply`）— MeshLab/Blender で開いて誤差の集中箇所を視覚的に確認
 
-## 適用範囲（実測）
-
-Tinkercad から取得した 14 個の実モデルを `scripts/batch_check.py` で回帰検証した結果:
-
-| カテゴリ | 件数 | 該当形状 |
-|---|---:|---|
-| **PASS** | 3 | 単一連結 or 少数連結 ＋ ~100 セグメント以下の単純押し出し形状（板＋穴、ボタンバーなど）|
-| **WARN** | 2 | 完走するが Hausdorff > 1mm（誤差過大、要手直し）|
-| **CRASH** | 2 | build123d 内部処理が 300 秒タイムアウト |
-| **TOO_COMPLEX** | 7 | 1 デザインあたり 800〜1200 ops、生成スクリプトが現実的時間で完了しない |
-
-詳しい数値は `scripts/batch_check.py` の出力を参照。
-
-### よく動くケース
-- 単一の連結パーツ
-- 押し出しベース＋少数の穴
-- 1〜2 のテーパー段（高さ方向で形状が緩やかに変わる）
-- セグメント数が 100 以下
-
-### 苦手なケース
-- Tinkercad アセンブリ（複数パーツが同一ワークプレーンに並ぶ） → 各パーツが多セグメントで合計 1000+ ops に
-- 急なテーパー / なめらかな曲面（階段近似で誤差が出やすい）
-- 高さ方向 30mm 超 ＋ 全層で形状が変化するモデル
-
-### CLI フラグで効くチューニング
-
-| フラグ | 効果 |
-|---|---|
-| `--no-split` | 連結成分分解を無効化（単純なメッシュなら速くなることも）|
-| `--drop-hole-area N` | N mm² 未満の内側穴（エングレーブ文字など）を無視。既定 5.0 |
-| `--drop-outer-area N` | N mm² 未満の外側ポリゴンを破棄。既定 2.0 |
-| `--min-component-volume N` | 連結成分の最小体積（mm³）。既定 50.0 |
-| `--min-component-faces N` | 連結成分の最小三角形数。既定 50 |
-| `--slice-step N` | Z スライス間隔（mm）。粗くするとセグメント数が減るが誤差大 |
-| `--no-loft` | loft 圧縮無効（OCCT loft が不安定な場合の保険）|
-| `--resample N` | 各輪郭リングを弧長等分で N 点にリサンプル（loft 安定化）。0 で無効 |
-
-### バッチ検証
+## バッチ検証
 
 ```bash
-.venv/bin/python scripts/batch_check.py models/your_designs/ \
+.venv/bin/python scripts/batch_check.py models/tinkercad_single/ \
     --hausdorff-max 1.0 --mean-max 0.1 --volume-delta-max 5.0 --p99-max 0.5 \
     --max-segments 500 --build-timeout 300
 ```
 
-各モデルを PASS / WARN / FAIL / CRASH / TOO_COMPLEX に分類した Markdown 表を stdout に出力。
+各モデルを `PASS / WARN / FAIL / CRASH / TOO_COMPLEX` に分類した Markdown 表を stdout に出力。
+
+## ディレクトリ構成
+
+- `scripts/` — mesh2py 本体とバッチランナー
+- `models/tinkercad_single/` — **推奨：単体パーツ STL の置き場所**
+- `models/tinkercad_assembly_sample/` — アセンブリ Export だとなぜ失敗するかの限界例（14モデル、回帰テスト用）
+- `output/` — 生成された build123d スクリプトと再構築STL（gitignore）
 
 ## 既知の制限 / 今後の課題
 
 - 傾斜・曲面は階段近似（生成コード上で `loft` や `revolve` に手動置換可）
-- 連結成分が複数あれば、それぞれ別ポリゴンとして並列に積み上げる
-- **OCCT `loft` の信頼性**: 多feature sketch や長い直線エッジで `BRep_API: command not done` が出やすい。要：頂点対応の改善、曲率ベース resample
-- **回転対称検出と `Cylinder`/`revolve` 直接生成**: テーパー軸対称部品を 1 行に圧縮できれば TOO_COMPLEX が大幅減
+- `--loft` は実験的。線形補間で非線形テーパーを近似するため、現状は精度が落ちる
+- アセンブリ Export（複数パーツ in 1 STL）は実用域外。Tinkercad 側で単体エクスポートを推奨
 
 ## ライセンス
 

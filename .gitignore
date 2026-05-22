@@ -12,8 +12,10 @@ env/
 # generated artifacts
 output/
 
-# downloaded test STLs from Tinkercad (large, regenerable)
-models/tinkercad_sample/
+# ad-hoc local STL drops — anything inside models/ that isn't an
+# explicitly-tracked sample directory is treated as scratch space.
+# (tinkercad_single/ and tinkercad_assembly_sample/ are tracked.)
+models/_scratch/
 
 # OS
 .DS_Store
