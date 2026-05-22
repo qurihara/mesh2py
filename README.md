@@ -177,4 +177,4 @@ uv pip install --python .venv/bin/python -r requirements.txt
 
 ## ライセンス
 
-未設定。リポジトリ所有者にお問い合わせください。
+MIT License — 詳細は [LICENSE](LICENSE) を参照。
