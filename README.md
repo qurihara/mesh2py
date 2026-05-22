@@ -60,7 +60,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 
 ```bash
 .venv/bin/python scripts/mesh2py.py \
-    models/tinkercad_assembly_sample/14_vertical-impact-button-f30-v61.stl \
+    models/vertical-impact-button-f30-v6.1.stl \
     -o output/vertical-impact-button.py \
     --deviation-ply output/deviation.ply
 ```
@@ -137,8 +137,8 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ## ディレクトリ構成
 
 - `scripts/` — mesh2py 本体とバッチランナー
-- `models/tinkercad_single/` — **推奨：単体パーツ STL の置き場所**
-- `models/tinkercad_assembly_sample/` — アセンブリ Export だとなぜ失敗するかの限界例（14モデル、回帰テスト用）
+- `models/tinkercad_single/` — **推奨：単体パーツ STL の置き場所**（STL本体は IP のためリポジトリには含めません）
+- `models/tinkercad_assembly_sample/` — アセンブリ Export の限界例置き場（同じく STL は gitignore、READMEで挙動を共有のみ）
 - `output/` — 生成された build123d スクリプトと再構築STL（gitignore）
 
 ## 既知の制限 / 今後の課題

@@ -12,9 +12,14 @@ env/
 # generated artifacts
 output/
 
-# ad-hoc local STL drops — anything inside models/ that isn't an
-# explicitly-tracked sample directory is treated as scratch space.
-# (tinkercad_single/ and tinkercad_assembly_sample/ are tracked.)
+# Tinkercad-derived STLs are kept locally only (IP / privacy).
+models/tinkercad_assembly_sample/*.stl
+models/tinkercad_assembly_sample/_designs.txt
+models/tinkercad_assembly_sample/_skipped.txt
+models/tinkercad_single/*.stl
+models/tinkercad_single/*.obj
+models/tinkercad_single/*.glb
+# ad-hoc local STL drops
 models/_scratch/
 
 # OS
