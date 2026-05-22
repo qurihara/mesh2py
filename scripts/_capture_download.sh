@@ -7,7 +7,8 @@ set -u
 NN="$1"
 SLUG="$2"
 SENTINEL="$3"
-DEST="models/tinkercad_sample/${NN}_${SLUG}.stl"
+DEST_DIR="${4:-models/tinkercad_single}"
+DEST="${DEST_DIR}/${NN}_${SLUG}.stl"
 
 for i in $(seq 1 15); do
   FOUND=$(find ~/Downloads -maxdepth 1 -name '*.stl' -newer "$SENTINEL" -print -quit 2>/dev/null)
