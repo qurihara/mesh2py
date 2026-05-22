@@ -25,7 +25,7 @@ from _mesh_utils import (
     load_mesh, align_to_z, slice_z, simplify_polys, strip_small_holes,
     resample_polys, mesh_summary, split_components,
 )
-from _feature_detect import segment_slices, group_lofts
+from _feature_detect import segment_slices, group_lofts, detect_primitive
 from _codegen import render_script
 from _error_analysis import analyze, format_report, write_deviation_ply
 
@@ -68,6 +68,8 @@ def main() -> int:
                     help="discard components with fewer than this many triangles")
     ap.add_argument("--no-loft", action="store_true",
                     help="disable loft compression of similar-topology consecutive segments")
+    ap.add_argument("--no-primitive", action="store_true",
+                    help="disable Cylinder/revolve primitive detection per component")
     ap.add_argument("--drop-hole-area", type=float, default=5.0,
                     help="ignore interior holes whose area is below this "
                          "(mm^2). Default 5.0 mm^2 (drops engraved letter text).")
@@ -106,6 +108,7 @@ def main() -> int:
           f"(volumes: {[round(c.volume, 1) if c.is_volume else None for c in components]})")
 
     per_comp_groups: list = []
+    n_primitive_total = 0
     for ci, comp in enumerate(components):
         print(f"[comp {ci}] tris={len(comp.faces)} extents={comp.extents}")
         slices = slice_z(comp, args.slice_step)
@@ -115,6 +118,20 @@ def main() -> int:
                 s.polygons = strip_small_holes(s.polygons, args.drop_hole_area)
             if args.resample > 0:
                 s.polygons = resample_polys(s.polygons, args.resample)
+
+        # Primitive detection short-circuit: rotationally symmetric component
+        # -> emit Cylinder/revolve directly, skipping slice/loft pipeline.
+        if not args.no_primitive:
+            z_bounds = (float(comp.bounds[0, 2]), float(comp.bounds[1, 2]))
+            prim = detect_primitive(slices, z_bounds=z_bounds)
+            if prim is not None:
+                kind = type(prim).__name__
+                print(f"[comp {ci}] primitive detected: {kind} "
+                      f"(axis=({prim.cx:.2f}, {prim.cy:.2f}), z={prim.z_lo:.2f}..{prim.z_hi:.2f})")
+                per_comp_groups.append([prim])
+                n_primitive_total += 1
+                continue
+
         segments = segment_slices(
             slices, args.slice_step, merge_tol=args.merge_tol,
             drop_hole_area=args.drop_hole_area,
@@ -128,6 +145,9 @@ def main() -> int:
         print(f"[comp {ci}] {len(slices)} layers -> {len(segments)} segs "
               f"-> {len(groups)} ops ({n_loft} loft)")
         per_comp_groups.append(groups)
+    if n_primitive_total:
+        print(f"[prim]   {n_primitive_total}/{len(components)} components "
+              f"reduced to primitives (Cylinder/revolve)")
 
     total_ops = sum(len(g) for g in per_comp_groups)
     print(f"[seg]    {total_ops} ops total across {len(components)} component(s)")

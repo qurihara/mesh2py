@@ -34,6 +34,29 @@ class Segment:
 
 
 @dataclass
+class CylinderPrimitive:
+    """A right circular cylinder around the Z axis at (cx, cy)."""
+    cx: float
+    cy: float
+    radius: float
+    z_lo: float
+    z_hi: float
+
+
+@dataclass
+class RevolvePrimitive:
+    """A solid of revolution around the Z axis at (cx, cy).
+    `profile` is a list of (radius, z) samples along the surface; the
+    full closed profile is constructed at emit time as
+    (0, z_lo) -> (r0, z_lo) -> ... -> (rn, z_hi) -> (0, z_hi)."""
+    cx: float
+    cy: float
+    z_lo: float
+    z_hi: float
+    profile: list[tuple[float, float]]   # (radius, z)
+
+
+@dataclass
 class LoftGroup:
     """A run of consecutive segments with matching topology, to be emitted
     as a single `loft(...)` instead of N stacked extrudes.
@@ -253,7 +276,80 @@ def _features_match_topology(a: list[Feature2D], b: list[Feature2D]) -> bool:
     return True
 
 
-Group = Segment | LoftGroup
+Group = Segment | LoftGroup | CylinderPrimitive | RevolvePrimitive
+
+
+# ---------------------------------------------------------------- primitive detect
+
+def detect_primitive(
+    slices: list[Slice2D],
+    *,
+    z_bounds: tuple[float, float] | None = None,
+    radial_tol_rel: float = 0.05,
+    centroid_drift_rel: float = 0.05,
+    cylinder_tol_rel: float = 0.02,
+) -> CylinderPrimitive | RevolvePrimitive | None:
+    """If every slice of the component is a circle around the same axis,
+    return a Cylinder (constant radius) or Revolve (varying radius)
+    primitive descriptor. Returns None for non-symmetric meshes.
+
+    Detection rules:
+    1. Each slice has exactly 1 outer polygon and no interior holes.
+    2. The polygon's vertices all lie on a circle around a slice-local
+       centroid (radial std/mean < `radial_tol_rel`).
+    3. The slice centroid stays close to the first slice's centroid
+       (drift < `centroid_drift_rel` of mean radius).
+    4. If the per-slice radius std/mean < `cylinder_tol_rel`,
+       it's a Cylinder; otherwise it's a Revolve.
+    """
+    if not slices or len(slices) < 2:
+        return None
+
+    # All slices must have a single outer polygon with no holes
+    for s in slices:
+        if len(s.polygons) != 1:
+            return None
+        if list(s.polygons[0].interiors):
+            return None
+
+    p0 = slices[0].polygons[0]
+    pts0 = np.array(list(p0.exterior.coords)[:-1], dtype=float)
+    cx0 = float(p0.centroid.x)
+    cy0 = float(p0.centroid.y)
+
+    radii: list[tuple[float, float]] = []
+    for s in slices:
+        p = s.polygons[0]
+        pts = np.array(list(p.exterior.coords)[:-1], dtype=float)
+        c = p.centroid
+        d = np.linalg.norm(pts - np.array([c.x, c.y]), axis=1)
+        r_mean = float(d.mean())
+        if r_mean < 1e-6:
+            return None
+        # Radial uniformity check
+        if float(d.std()) / r_mean > radial_tol_rel:
+            return None
+        # Axis stability (centroid stays put)
+        drift = ((c.x - cx0) ** 2 + (c.y - cy0) ** 2) ** 0.5
+        if drift > max(r_mean * centroid_drift_rel, 0.3):
+            return None
+        radii.append((r_mean, float(s.z)))
+
+    # Determine cylinder vs revolve from radius variation
+    rs = np.array([r for r, _ in radii])
+    rs_mean = float(rs.mean())
+    rs_std = float(rs.std())
+    if z_bounds is not None:
+        z_lo, z_hi = float(z_bounds[0]), float(z_bounds[1])
+    else:
+        z_lo = radii[0][1]
+        z_hi = radii[-1][1]
+
+    if rs_std / max(rs_mean, 1e-6) < cylinder_tol_rel:
+        return CylinderPrimitive(cx=cx0, cy=cy0, radius=rs_mean,
+                                 z_lo=z_lo, z_hi=z_hi)
+    return RevolvePrimitive(cx=cx0, cy=cy0, z_lo=z_lo, z_hi=z_hi,
+                            profile=radii)
 
 
 def _loft_safe(features: list[Feature2D], *, max_poly_pts: int = 80) -> bool:

@@ -25,16 +25,27 @@ def load_mesh(path: Path) -> trimesh.Trimesh:
     return obj
 
 
-def align_to_z(mesh: trimesh.Trimesh, axis: str | None = None) -> trimesh.Trimesh:
+def align_to_z(mesh: trimesh.Trimesh, axis: str | None = None,
+               *, swap_ratio: float = 0.9) -> trimesh.Trimesh:
     """Rotate so the minimum-variance axis is Z (the "thickness" axis),
-    then translate so min corner is at origin."""
+    then translate so min corner is at origin.
+
+    Only swap axes when the candidate axis is meaningfully smaller than
+    the largest (min/max < `swap_ratio`). For roughly cube-shaped or
+    cylindrical (h ≈ 2r) meshes that lack a clear "thin" axis, leave
+    the orientation alone — swapping there can lay a cylinder on its
+    side and break primitive detection.
+    """
     m = mesh.copy()
     if axis in {"x", "y", "z"}:
         idx = {"x": 0, "y": 1, "z": 2}[axis]
+        do_swap = (idx != 2)
     else:
         ext = m.extents
         idx = int(np.argmin(ext))
-    if idx != 2:
+        ratio = float(ext[idx]) / max(float(ext.max()), 1e-9)
+        do_swap = (idx != 2) and (ratio < swap_ratio)
+    if do_swap and idx != 2:
         # swap idx <-> 2 via permutation matrix
         perm = [0, 1, 2]
         perm[idx], perm[2] = perm[2], perm[idx]

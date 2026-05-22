@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import textwrap
 
-from _feature_detect import Feature2D, Segment, LoftGroup
+from _feature_detect import (
+    Feature2D, Segment, LoftGroup, CylinderPrimitive, RevolvePrimitive,
+)
 
 
 def _fmt_pts(pts: list[tuple[float, float]]) -> str:
@@ -116,8 +118,9 @@ def render_script(
         they are combined as a Compound at the end (no boolean fusion).
         """
         from build123d import (
-            BuildPart, BuildSketch, Plane, Locations, Pos, Rot, Mode, Align,
-            Circle, Rectangle, Polygon, Compound, extrude, loft, export_stl,
+            BuildPart, BuildSketch, Plane, Locations, Pos, Rot, Mode, Align, Axis,
+            Circle, Rectangle, Polygon, Cylinder, Compound,
+            extrude, loft, revolve, export_stl,
         )
 
     ''')
@@ -131,6 +134,51 @@ def render_script(
             body_lines.append("    pass")
         for si, g in enumerate(groups):
             h = g.z_hi - g.z_lo
+            if isinstance(g, CylinderPrimitive):
+                body_lines.append(
+                    f"    # ---- comp {ci} cylinder: z={g.z_lo:.3f}..{g.z_hi:.3f} "
+                    f"(h={h:.3f}, r={g.radius:.3f}) ----"
+                )
+                body_lines.append(
+                    f"    with Locations(Pos({g.cx:.3f}, {g.cy:.3f}, {g.z_lo:.3f})):"
+                )
+                body_lines.append(
+                    f"        Cylinder({g.radius:.3f}, {h:.3f}, "
+                    f"align=(Align.CENTER, Align.CENTER, Align.MIN))"
+                )
+                continue
+            if isinstance(g, RevolvePrimitive):
+                body_lines.append(
+                    f"    # ---- comp {ci} revolve: z={g.z_lo:.3f}..{g.z_hi:.3f} "
+                    f"(h={h:.3f}, {len(g.profile)} profile pts) ----"
+                )
+                # Build closed profile in the XZ half-plane (x = radius).
+                # Vertices: (0, z_lo) -> (r0, z_lo) -> ... -> (rn, z_hi) -> (0, z_hi)
+                # We emit relative to the profile's bbox center and wrap in
+                # Locations() so the polygon lands at its world position
+                # regardless of how build123d's default Align.CENTER moves
+                # the local Polygon origin.
+                pts: list[tuple[float, float]] = [(0.0, g.z_lo)]
+                for r, z in g.profile:
+                    pts.append((float(r), float(z)))
+                pts.append((0.0, g.z_hi))
+                xs = [p[0] for p in pts]
+                zs = [p[1] for p in pts]
+                pcx = (min(xs) + max(xs)) / 2.0
+                pcz = (min(zs) + max(zs)) / 2.0
+                rel = [(x - pcx, z - pcz) for x, z in pts]
+                pts_str = ", ".join(f"({x:.3f}, {z:.3f})" for x, z in rel)
+                body_lines.append(
+                    f"    with BuildSketch(Plane.XZ) as prof_{ci}_{si}:"
+                )
+                body_lines.append(
+                    f"        with Locations(Pos({pcx:.3f}, {pcz:.3f})):"
+                )
+                body_lines.append(f"            Polygon({pts_str})")
+                body_lines.append(
+                    f"    revolve(prof_{ci}_{si}.sketch, axis=Axis.Z)"
+                )
+                continue
             if isinstance(g, LoftGroup):
                 kinds = ", ".join(f.kind for f in g.features_lo) or "empty"
                 body_lines.append(
@@ -188,7 +236,16 @@ def render_script(
                 for f in g.rep_features:
                     body_lines.extend(_feature_sketch_lines(f, indent="        "))
                 body_lines.append(f"    extrude(amount={h:.3f})")
-        body_lines.append(f"parts.append(part_{ci}.part)")
+        # If this component contains a revolve, its axis was world Z;
+        # translate the resulting part so its axis lands at (cx, cy).
+        revolves = [g for g in groups if isinstance(g, RevolvePrimitive)]
+        if len(revolves) == 1 and len(groups) == 1:
+            r = revolves[0]
+            body_lines.append(
+                f"parts.append(Pos({r.cx:.3f}, {r.cy:.3f}) * part_{ci}.part)"
+            )
+        else:
+            body_lines.append(f"parts.append(part_{ci}.part)")
         body_lines.append("")
 
     body_lines.append("result = Compound(parts) if len(parts) > 1 else parts[0]")
